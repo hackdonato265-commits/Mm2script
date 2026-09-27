@@ -1,0 +1,665 @@
+--====================================================================--
+--      DELTA EXECUTOR HUB - MM2 (BRING ORIGINAL + TP ESTÁTICO + KILL ALL) v4.3 --
+--====================================================================--
+
+local Success, Error = pcall(function()
+
+-- ====================================================================
+-- 1. SERVICIOS
+-- ====================================================================
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local Workspace         = game:GetService("Workspace")
+local CoreGui           = game:GetService("CoreGui")
+local VirtualUser       = game:GetService("VirtualUser")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera      = Workspace.CurrentCamera
+
+local ParentUI        = (gethui and gethui()) or CoreGui or LocalPlayer:WaitForChild("PlayerGui")
+
+if ParentUI:FindFirstChild("MM2DeltaHub") then ParentUI.MM2DeltaHub:Destroy() end
+
+-- ====================================================================
+-- 2. CONFIG
+-- ====================================================================
+local Config = {
+    ESP = { Enabled=false, ShowNames=true, ShowDistance=true, ShowWeapons=true,
+        MurderColor=Color3.fromRGB(255,50,50), SheriffColor=Color3.fromRGB(50,120,255),
+        InnocentColor=Color3.fromRGB(50,255,100) },
+    Aimbot = { Enabled=false, Prediction=0.165, Smoothness=0.25 },
+    Bring = { Murderer=false, Sheriff=false, Innocent=false, GunDrop=false, StaticMurderer=false, Distance=3 },
+    Combat = { AutoKillAll=false },
+    Fling = { Active=false },
+    AutoPickup = { Coins=false, Weapons=false, Range=50 },
+    AutoDodge = { Enabled=false, Distance=15, ReactionDelay=0.15 },
+    Movement = { SpeedEnabled=false, WalkSpeed=16, JumpEnabled=false, JumpPower=50,
+        FlyEnabled=false, FlySpeed=30, NoclipEnabled=false },
+    Farm = { CoinFarm=false, HumanDelay=0.35, MaxTeleportDist=12 },
+    Safety = { AntiAFK=true, RandomizeDelays=true }
+}
+
+-- ====================================================================
+-- 3. ROLES Y MONEDAS
+-- ====================================================================
+local RoleCache = {}
+local function HasToolIn(player, names)
+    if not player then return false end
+    local char, bp = player.Character, player:FindFirstChild("Backpack")
+    local function ck(c)
+        if not c then return false end
+        for _,n in ipairs(names) do local it=c:FindFirstChild(n); if it and it:IsA("Tool") then return true end end
+        return false
+    end
+    return ck(char) or ck(bp)
+end
+
+local function GetPlayerRole(player)
+    if not player then return "Innocent" end
+    local c = RoleCache[player]
+    if c and (tick()-c.t) < 0.4 then return c.role end
+    local role = "Innocent"
+    if HasToolIn(player, {"Gun","Revolver"}) then role = "Sheriff"
+    elseif HasToolIn(player, {"Knife"}) then role = "Murderer" end
+    RoleCache[player] = {role=role, t=tick()}
+    return role
+end
+
+local CurrentMurderer, CurrentSheriff = nil, nil
+local function UpdateRoles()
+    CurrentMurderer, CurrentSheriff = nil, nil
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            local h = p.Character:FindFirstChildOfClass("Humanoid")
+            if h and h.Health > 0 then
+                local r = GetPlayerRole(p)
+                if r == "Murderer" then CurrentMurderer = p
+                elseif r == "Sheriff" then CurrentSheriff = p end
+            end
+        end
+    end
+end
+
+task.spawn(function()
+    while task.wait(0.5) do UpdateRoles() end
+end)
+
+local function IsValidCoin(o)
+    if not o or not o:IsA("BasePart") then return false end
+    if o.Transparency >= 0.9 or o.Name ~= "Coin" then return false end
+    if not o:FindFirstChildOfClass("TouchInterest") then return false end
+    return true
+end
+
+local function FindNearestCoin(fromPos, maxRange)
+    maxRange = maxRange or 200
+    local nearest, best = nil, maxRange
+    local roots = {}
+    local cc = Workspace:FindFirstChild("CoinContainer", true); if cc then table.insert(roots, cc) end
+    local nm = Workspace:FindFirstChild("Normal", true);        if nm then table.insert(roots, nm) end
+    table.insert(roots, Workspace)
+    local seen = {}
+    for _, r in ipairs(roots) do
+        for _, o in ipairs(r:GetDescendants()) do
+            if not seen[o] then
+                seen[o] = true
+                if IsValidCoin(o) then
+                    local d = (o.Position - fromPos).Magnitude
+                    if d < best then best = d; nearest = o end
+                end
+            end
+        end
+    end
+    return nearest, best
+end
+
+-- ====================================================================
+-- 4. UI
+-- ====================================================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "MM2DeltaHub"; ScreenGui.ResetOnSpawn = false
+ScreenGui.DisplayOrder = 2147483647; ScreenGui.Parent = ParentUI
+
+local FloatCircle = Instance.new("TextButton")
+FloatCircle.Size = UDim2.new(0,50,0,50); FloatCircle.Position = UDim2.new(0.05,0,0.2,0)
+FloatCircle.BackgroundColor3 = Color3.fromRGB(25,25,35); FloatCircle.Text = "MM2"
+FloatCircle.TextColor3 = Color3.fromRGB(255,85,85)
+FloatCircle.Font = Enum.Font.GothamBold; FloatCircle.TextSize = 14
+FloatCircle.Visible = false; FloatCircle.Parent = ScreenGui
+Instance.new("UICorner", FloatCircle).CornerRadius = UDim.new(1,0)
+local FS = Instance.new("UIStroke", FloatCircle)
+FS.Color = Color3.fromRGB(255,85,85); FS.Thickness = 2
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0,400,0,320); MainFrame.Position = UDim2.new(0.5,-200,0.25,0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(18,18,24)
+MainFrame.BorderSizePixel = 0; MainFrame.ClipsDescendants = true; MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0,10)
+
+local function MakeDraggable(obj)
+    local drag, dI, dS, sP
+    obj.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            drag = true; dS = input.Position; sP = obj.Position
+            input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then drag = false end end)
+        end
+    end)
+    obj.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dI = input end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dI and drag then
+            local d = input.Position - dS
+            obj.Position = UDim2.new(sP.X.Scale, sP.X.Offset + d.X, sP.Y.Scale, sP.Y.Offset + d.Y)
+        end
+    end)
+end
+MakeDraggable(MainFrame); MakeDraggable(FloatCircle)
+
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1,0,0,35); TopBar.BackgroundColor3 = Color3.fromRGB(28,28,38); TopBar.Parent = MainFrame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1,-90,1,0); Title.Position = UDim2.new(0,10,0,0)
+Title.Text = "MM2 Delta Hub | v4.3"; Title.TextColor3 = Color3.fromRGB(255,255,255)
+Title.Font = Enum.Font.GothamBold; Title.TextSize = 12
+Title.TextXAlignment = Enum.TextXAlignment.Left; Title.BackgroundTransparency = 1; Title.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0,25,0,25); CloseBtn.Position = UDim2.new(1,-30,0,5)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(230,50,50); CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255,255,255); CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.Parent = TopBar; Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0,6)
+
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0,25,0,25); MinBtn.Position = UDim2.new(1,-60,0,5)
+MinBtn.BackgroundColor3 = Color3.fromRGB(60,60,80); MinBtn.Text = "-"
+MinBtn.TextColor3 = Color3.fromRGB(255,255,255); MinBtn.Font = Enum.Font.GothamBold
+MinBtn.Parent = TopBar; Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0,6)
+
+MinBtn.MouseButton1Click:Connect(function() MainFrame.Visible=false; FloatCircle.Visible=true end)
+FloatCircle.MouseButton1Click:Connect(function() MainFrame.Visible=true; FloatCircle.Visible=false end)
+
+local TabContainer = Instance.new("Frame")
+TabContainer.Size = UDim2.new(0,115,1,-35); TabContainer.Position = UDim2.new(0,0,0,35)
+TabContainer.BackgroundColor3 = Color3.fromRGB(22,22,30); TabContainer.Parent = MainFrame
+
+local ContentContainer = Instance.new("Frame")
+ContentContainer.Size = UDim2.new(1,-115,1,-35); ContentContainer.Position = UDim2.new(0,115,0,35)
+ContentContainer.BackgroundTransparency = 1; ContentContainer.Parent = MainFrame
+
+local TLL = Instance.new("UIListLayout")
+TLL.SortOrder = Enum.SortOrder.LayoutOrder; TLL.Padding = UDim.new(0,2); TLL.Parent = TabContainer
+
+local Tabs = {}
+local function CreateTab(name)
+    local B = Instance.new("TextButton")
+    B.Size = UDim2.new(1,0,0,28); B.BackgroundColor3 = Color3.fromRGB(28,28,38)
+    B.Text = name; B.TextColor3 = Color3.fromRGB(180,180,180)
+    B.Font = Enum.Font.Gotham; B.TextSize = 10; B.Parent = TabContainer
+    local P = Instance.new("ScrollingFrame")
+    P.Size = UDim2.new(1,-10,1,-10); P.Position = UDim2.new(0,5,0,5)
+    P.BackgroundTransparency = 1; P.ScrollBarThickness = 3; P.Visible = false; P.Parent = ContentContainer
+    local L = Instance.new("UIListLayout")
+    L.SortOrder = Enum.SortOrder.LayoutOrder; L.Padding = UDim.new(0,6); L.Parent = P
+    B.MouseButton1Click:Connect(function()
+        for _, t in pairs(Tabs) do
+            t.Page.Visible = false
+            t.Btn.BackgroundColor3 = Color3.fromRGB(28,28,38)
+            t.Btn.TextColor3 = Color3.fromRGB(180,180,180)
+        end
+        P.Visible = true
+        B.BackgroundColor3 = Color3.fromRGB(255,85,85)
+        B.TextColor3 = Color3.fromRGB(255,255,255)
+    end)
+    Tabs[name] = {Btn=B, Page=P}
+    return P
+end
+
+local function CreateToggle(parent, text, default, cb)
+    local F = Instance.new("Frame")
+    F.Size = UDim2.new(1,0,0,30); F.BackgroundColor3 = Color3.fromRGB(28,28,38); F.Parent = parent
+    Instance.new("UICorner", F).CornerRadius = UDim.new(0,6)
+    local L = Instance.new("TextLabel")
+    L.Size = UDim2.new(0.7,0,1,0); L.Position = UDim2.new(0,8,0,0)
+    L.Text = text; L.TextColor3 = Color3.fromRGB(220,220,220)
+    L.Font = Enum.Font.Gotham; L.TextSize = 10
+    L.TextXAlignment = Enum.TextXAlignment.Left; L.BackgroundTransparency = 1; L.Parent = F
+    local B = Instance.new("TextButton")
+    B.Size = UDim2.new(0,45,0,20); B.Position = UDim2.new(1,-50,0.5,-10)
+    B.BackgroundColor3 = default and Color3.fromRGB(0,180,100) or Color3.fromRGB(60,60,75)
+    B.Text = default and "ON" or "OFF"; B.TextColor3 = Color3.fromRGB(255,255,255)
+    B.Font = Enum.Font.GothamBold; B.TextSize = 10; B.Parent = F
+    Instance.new("UICorner", B).CornerRadius = UDim.new(0,4)
+    local st = default
+    B.MouseButton1Click:Connect(function()
+        st = not st
+        B.BackgroundColor3 = st and Color3.fromRGB(0,180,100) or Color3.fromRGB(60,60,75)
+        B.Text = st and "ON" or "OFF"
+        cb(st)
+    end)
+end
+
+local function CreateSlider(parent, text, mn, mx, dflt, cb)
+    local F = Instance.new("Frame")
+    F.Size = UDim2.new(1,0,0,40); F.BackgroundColor3 = Color3.fromRGB(28,28,38); F.Parent = parent
+    Instance.new("UICorner", F).CornerRadius = UDim.new(0,6)
+    local L = Instance.new("TextLabel")
+    L.Size = UDim2.new(1,-10,0,18); L.Position = UDim2.new(0,8,0,2)
+    L.Text = text..": "..tostring(dflt); L.TextColor3 = Color3.fromRGB(220,220,220)
+    L.Font = Enum.Font.Gotham; L.TextSize = 10
+    L.TextXAlignment = Enum.TextXAlignment.Left; L.BackgroundTransparency = 1; L.Parent = F
+    local SB = Instance.new("Frame")
+    SB.Size = UDim2.new(1,-16,0,8); SB.Position = UDim2.new(0,8,0,24)
+    SB.BackgroundColor3 = Color3.fromRGB(45,45,60); SB.Parent = F
+    Instance.new("UICorner", SB).CornerRadius = UDim.new(0,4)
+    local Fi = Instance.new("Frame")
+    Fi.Size = UDim2.new((dflt-mn)/(mx-mn),0,1,0); Fi.BackgroundColor3 = Color3.fromRGB(255,85,85); Fi.Parent = SB
+    Instance.new("UICorner", Fi).CornerRadius = UDim.new(0,4)
+    local drag = false
+    local function Upd(input)
+        local pos = math.clamp((input.Position.X - SB.AbsolutePosition.X) / SB.AbsoluteSize.X, 0, 1)
+        local v = math.floor(mn + (mx-mn)*pos)
+        Fi.Size = UDim2.new(pos,0,1,0); L.Text = text..": "..tostring(v); cb(v)
+    end
+    SB.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then drag = true; Upd(i) end end)
+    UserInputService.InputChanged:Connect(function(i) if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then Upd(i) end end)
+    UserInputService.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then drag = false end end)
+end
+
+local VisualPage = CreateTab("Visuales")
+local CombatPage = CreateTab("Combate")
+local JugadoresPage = CreateTab("Jugadores")
+local MovePage   = CreateTab("Movimiento")
+local FarmPage   = CreateTab("Farm/TP")
+local SafePage   = CreateTab("Seguridad")
+
+Tabs["Visuales"].Page.Visible = true
+Tabs["Visuales"].Btn.BackgroundColor3 = Color3.fromRGB(255,85,85)
+
+
+-- ====================================================================
+-- 5. FUNCIONALIDADES
+-- ====================================================================
+
+-- ESP
+CreateToggle(VisualPage,"Activar ESP Roles",Config.ESP.Enabled,function(v) Config.ESP.Enabled=v end)
+CreateToggle(VisualPage,"Mostrar Nombres",Config.ESP.ShowNames,function(v) Config.ESP.ShowNames=v end)
+CreateToggle(VisualPage,"Mostrar Distancia",Config.ESP.ShowDistance,function(v) Config.ESP.ShowDistance=v end)
+CreateToggle(VisualPage,"Mostrar Armas",Config.ESP.ShowWeapons,function(v) Config.ESP.ShowWeapons=v end)
+
+local ESP_Storage = {}
+local function ClearESP(p)
+    if ESP_Storage[p] then
+        if ESP_Storage[p].H then ESP_Storage[p].H:Destroy() end
+        if ESP_Storage[p].B then ESP_Storage[p].B:Destroy() end
+        ESP_Storage[p] = nil
+    end
+end
+local function ApplyESP(p)
+    if p == LocalPlayer or not p.Character then return end
+    local char = p.Character
+    local hrp = char:FindFirstChild("HumanoidRootPart"); if not hrp then return end
+    if not ESP_Storage[p] then ESP_Storage[p] = {} end
+    local role = GetPlayerRole(p)
+    local color = Config.ESP.InnocentColor
+    if role == "Murderer" then color = Config.ESP.MurderColor
+    elseif role == "Sheriff" then color = Config.ESP.SheriffColor end
+    if not ESP_Storage[p].H then
+        local hl = Instance.new("Highlight")
+        hl.FillTransparency=0.5; hl.OutlineTransparency=0
+        hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Parent=char
+        ESP_Storage[p].H = hl
+    end
+    ESP_Storage[p].H.FillColor=color; ESP_Storage[p].H.OutlineColor=color
+    ESP_Storage[p].H.Enabled = Config.ESP.Enabled
+    if not ESP_Storage[p].B then
+        local bb = Instance.new("BillboardGui")
+        bb.Size=UDim2.new(0,200,0,40); bb.AlwaysOnTop=true; bb.StudsOffset=Vector3.new(0,3,0)
+        local l = Instance.new("TextLabel")
+        l.Size=UDim2.new(1,0,1,0); l.BackgroundTransparency=1
+        l.Font=Enum.Font.GothamBold; l.TextSize=11
+        l.TextColor3=Color3.fromRGB(255,255,255); l.TextStrokeTransparency=0; l.Parent=bb
+        bb.Parent=hrp; ESP_Storage[p].B=bb
+    end
+    local text = ""
+    if Config.ESP.ShowNames then text = text..p.DisplayName.."\n" end
+    text = text.."["..role.."]"
+    if Config.ESP.ShowDistance and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        text = text.." ("..math.floor((hrp.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude).."m)"
+    end
+    local lbl = ESP_Storage[p].B:FindFirstChildOfClass("TextLabel")
+    if lbl then lbl.Text=text; lbl.TextColor3=color end
+    ESP_Storage[p].B.Enabled = Config.ESP.Enabled
+end
+task.spawn(function()
+    while task.wait(0.5) do
+        if Config.ESP.Enabled then
+            for _,p in ipairs(Players:GetPlayers()) do if p ~= LocalPlayer then ApplyESP(p) end end
+        else
+            for p in pairs(ESP_Storage) do ClearESP(p) end
+        end
+    end
+end)
+
+-- Aimbot (Cámara suave)
+CreateToggle(CombatPage,"Sheriff Aimbot (Cámara)",Config.Aimbot.Enabled,function(v) Config.Aimbot.Enabled=v end)
+CreateSlider(CombatPage,"Predicción",1,30,16,function(v) Config.Aimbot.Prediction=v/100 end)
+
+-- Función para Asesinos: Auto Kill All (Teletransporta al asesino hacia los jugadores vivos)
+CreateToggle(CombatPage,"Auto Kill All (Asesino)",Config.Combat.AutoKillAll,function(v)
+    Config.Combat.AutoKillAll = v
+    if v then
+        task.spawn(function()
+            while Config.Combat.AutoKillAll do
+                if GetPlayerRole(LocalPlayer) == "Murderer" then
+                    local c = LocalPlayer.Character
+                    local hrp = c and c:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        for _,p in ipairs(Players:GetPlayers()) do
+                            if not Config.Combat.AutoKillAll then break end
+                            if p ~= LocalPlayer and p.Character then
+                                local pH = p.Character:FindFirstChild("HumanoidRootPart")
+                                local pHum = p.Character:FindFirstChildOfClass("Humanoid")
+                                if pH and pHum and pHum.Health > 0 then
+                                    hrp.CFrame = pH.CFrame * CFrame.new(0, 0, 2)
+                                    task.wait(0.25)
+                                end
+                            end
+                        end
+                    end
+                end
+                task.wait(1)
+            end
+        end)
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if Config.Aimbot.Enabled and GetPlayerRole(LocalPlayer)=="Sheriff" and CurrentMurderer and CurrentMurderer.Character then
+        local tH = CurrentMurderer.Character:FindFirstChild("HumanoidRootPart")
+        if tH then
+            local pred = tH.Position + (tH.AssemblyLinearVelocity * Config.Aimbot.Prediction)
+            Camera.CFrame = Camera.CFrame:Lerp(CFrame.new(Camera.CFrame.Position, pred), Config.Aimbot.Smoothness)
+        end
+    end
+end)
+
+-- Jugadores (Bring Original Continuo + Nuevo Botón TP Estático + Bring Arma Suelo)
+CreateToggle(JugadoresPage,"Bring Asesino",Config.Bring.Murderer,function(v) Config.Bring.Murderer=v end)
+CreateToggle(JugadoresPage,"Bring Sheriff",Config.Bring.Sheriff,function(v) Config.Bring.Sheriff=v end)
+CreateToggle(JugadoresPage,"Bring Inocentes",Config.Bring.Innocent,function(v) Config.Bring.Innocent=v end)
+
+-- Nuevo Botón: TP Estático Asesino (Teletransporte permanente hasta apagarlo)
+local StaticCache = { Murderer = nil }
+CreateToggle(JugadoresPage,"TP Estático Asesino",Config.Bring.StaticMurderer,function(v)
+    Config.Bring.StaticMurderer = v
+    if v then
+        if CurrentMurderer and CurrentMurderer.Character then
+            local hrp = CurrentMurderer.Character:FindFirstChild("HumanoidRootPart")
+            local myHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if hrp and myHrp then
+                StaticCache.Murderer = {player = CurrentMurderer, cf = hrp.CFrame}
+                hrp.CFrame = myHrp.CFrame * CFrame.new(0, 0, -Config.Bring.Distance)
+            end
+        end
+    else
+        if StaticCache.Murderer and StaticCache.Murderer.player and StaticCache.Murderer.player.Character then
+            local hrp = StaticCache.Murderer.player.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then hrp.CFrame = StaticCache.Murderer.cf end
+        end
+        StaticCache.Murderer = nil
+    end
+end)
+
+CreateToggle(JugadoresPage,"Bring Arma (Suelo)",Config.Bring.GunDrop,function(v) Config.Bring.GunDrop=v end)
+CreateSlider(JugadoresPage,"Distancia Hitbox",0,5,Config.Bring.Distance,function(v) Config.Bring.Distance=v end)
+
+-- Loop General para Bring Normal y Bring Arma
+RunService.RenderStepped:Connect(function()
+    local c = LocalPlayer.Character
+    if not c or not c:FindFirstChild("HumanoidRootPart") then return end
+    local myHrp = c.HumanoidRootPart
+
+    -- Bring original continuo
+    if Config.Bring.Murderer or Config.Bring.Sheriff or Config.Bring.Innocent then
+        local targetCFrame = myHrp.CFrame * CFrame.new(0, 0, -Config.Bring.Distance)
+        for _,tp in ipairs(Players:GetPlayers()) do
+            if tp ~= LocalPlayer and tp.Character then
+                local role = GetPlayerRole(tp)
+                local shouldBring = false
+                if role == "Murderer" and Config.Bring.Murderer then shouldBring = true end
+                if role == "Sheriff" and Config.Bring.Sheriff then shouldBring = true end
+                if role == "Innocent" and Config.Bring.Innocent then shouldBring = true end
+
+                if shouldBring then
+                    local h = tp.Character:FindFirstChild("HumanoidRootPart")
+                    if h then
+                        h.CFrame = targetCFrame
+                        h.Velocity = Vector3.zero
+                        for _,pt in ipairs(tp.Character:GetChildren()) do
+                            if pt:IsA("BasePart") then pt.CanCollide = false end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Bring de Arma cuando está libre en el suelo
+    if Config.Bring.GunDrop then
+        for _,n in ipairs({"GunDrop", "Gun", "Revolver"}) do
+            local drop = Workspace:FindFirstChild(n)
+            if drop then
+                local part = drop:IsA("BasePart") and drop or drop:FindFirstChildOfClass("BasePart")
+                if part then
+                    part.CFrame = myHrp.CFrame
+                    part.Velocity = Vector3.zero
+                    if firetouchinterest then
+                        pcall(function()
+                            firetouchinterest(myHrp, part, 0)
+                            task.wait(0.01)
+                            firetouchinterest(myHrp, part, 1)
+                        end)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- Fling Spin All
+local function FlingLoop()
+    task.spawn(function()
+        while Config.Fling.Active do
+            for _,tp in ipairs(Players:GetPlayers()) do
+                if not Config.Fling.Active then break end
+                if tp ~= LocalPlayer and tp.Character then
+                    local c = LocalPlayer.Character
+                    local tC = tp.Character
+                    local hrp = c and c:FindFirstChild("HumanoidRootPart")
+                    local tH = tC and tC:FindFirstChild("HumanoidRootPart")
+                    local tHm = tC and tC:FindFirstChildOfClass("Humanoid")
+                    if hrp and tH and tHm and tHm.Health>0 then
+                        local bav = Instance.new("BodyAngularVelocity")
+                        bav.MaxTorque = Vector3.new(0,math.huge,0)
+                        bav.AngularVelocity = Vector3.new(0,999999,0); bav.Parent = hrp
+                        local st = tick()
+                        while Config.Fling.Active and (tick()-st<1.8) and tH and tH.Parent do
+                            hrp.CFrame = tH.CFrame; hrp.Velocity = Vector3.zero
+                            for _,p in ipairs(c:GetChildren()) do
+                                if p:IsA("BasePart") then p.CanCollide = false end
+                            end
+                            task.wait()
+                        end
+                        bav:Destroy(); task.wait(0.1)
+                    end
+                end
+            end
+            task.wait(0.3)
+        end
+    end)
+end
+CreateToggle(JugadoresPage,"Fling Spin All",Config.Fling.Active,function(v)
+    Config.Fling.Active = v; if v then FlingLoop() end
+end)
+
+-- AutoPickup
+CreateToggle(CombatPage,"Auto Recoger Monedas",Config.AutoPickup.Coins,function(v) Config.AutoPickup.Coins=v end)
+CreateToggle(CombatPage,"Auto Recoger Armas",Config.AutoPickup.Weapons,function(v) Config.AutoPickup.Weapons=v end)
+CreateToggle(CombatPage,"Auto-Esquivar",Config.AutoDodge.Enabled,function(v) Config.AutoDodge.Enabled=v end)
+task.spawn(function()
+    while task.wait(0.1) do
+        local c = LocalPlayer.Character
+        local hrp = c and c:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            if Config.AutoPickup.Weapons then
+                for _,n in ipairs({"GunDrop","Gun","Revolver"}) do
+                    local dr = Workspace:FindFirstChild(n)
+                    if dr then
+                        local tp = dr:IsA("BasePart") and dr or dr:FindFirstChildOfClass("BasePart")
+                        if tp and (tp.Position-hrp.Position).Magnitude <= Config.AutoPickup.Range and firetouchinterest then
+                            pcall(function()
+                                firetouchinterest(hrp,tp,0); task.wait(0.02); firetouchinterest(hrp,tp,1)
+                            end)
+                        end
+                    end
+                end
+            end
+            if Config.AutoPickup.Coins then
+                local coin = FindNearestCoin(hrp.Position, Config.AutoPickup.Range)
+                if coin and firetouchinterest then
+                    pcall(function()
+                        firetouchinterest(hrp,coin,0); task.wait(0.02); firetouchinterest(hrp,coin,1)
+                    end)
+                end
+            end
+        end
+    end
+end)
+task.spawn(function()
+    while task.wait(0.1) do
+        if Config.AutoDodge.Enabled and CurrentMurderer and CurrentMurderer.Character then
+            local mH = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            local tH = CurrentMurderer.Character:FindFirstChild("HumanoidRootPart")
+            if mH and tH and (tH.Position-mH.Position).Magnitude < Config.AutoDodge.Distance then
+                task.wait(0.15)
+                local h = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                if h then
+                    h.Jump = true
+                    mH.Velocity = (mH.Position-tH.Position).Unit*60 + Vector3.new(0,30,0)
+                end
+            end
+        end
+    end
+end)
+
+-- Movimiento
+CreateToggle(MovePage,"Modificar Velocidad",Config.Movement.SpeedEnabled,function(v) Config.Movement.SpeedEnabled=v end)
+CreateSlider(MovePage,"Velocidad",16,100,16,function(v) Config.Movement.WalkSpeed=v end)
+CreateToggle(MovePage,"Modificar Salto",Config.Movement.JumpEnabled,function(v) Config.Movement.JumpEnabled=v end)
+CreateSlider(MovePage,"Fuerza Salto",50,150,50,function(v) Config.Movement.JumpPower=v end)
+CreateToggle(MovePage,"Vuelo (Fly)",Config.Movement.FlyEnabled,function(v) Config.Movement.FlyEnabled=v end)
+CreateToggle(MovePage,"Noclip",Config.Movement.NoclipEnabled,function(v) Config.Movement.NoclipEnabled=v end)
+
+RunService.Stepped:Connect(function()
+    local c = LocalPlayer.Character
+    if c then
+        local h = c:FindFirstChildOfClass("Humanoid")
+        if h then
+            if Config.Movement.SpeedEnabled then h.WalkSpeed = Config.Movement.WalkSpeed end
+            if Config.Movement.JumpEnabled then h.JumpPower = Config.Movement.JumpPower end
+        end
+        if Config.Movement.NoclipEnabled then
+            for _,p in ipairs(c:GetDescendants()) do if p:IsA("BasePart") then p.CanCollide=false end end
+        end
+    end
+end)
+
+local Flying = false
+task.spawn(function()
+    while task.wait(0.1) do
+        if Config.Movement.FlyEnabled and not Flying then
+            Flying = true
+            local c = LocalPlayer.Character
+            if c and c:FindFirstChild("HumanoidRootPart") then
+                local hrp = c.HumanoidRootPart
+                local bv = Instance.new("BodyVelocity",hrp); bv.MaxForce = Vector3.new(1e9,1e9,1e9)
+                local gy = Instance.new("BodyGyro",hrp); gy.MaxTorque = Vector3.new(1e9,1e9,1e9)
+                while Config.Movement.FlyEnabled and c and c.Parent do
+                    gy.CFrame = Camera.CFrame
+                    local h = c:FindFirstChildOfClass("Humanoid")
+                    if h then
+                        local md = h.MoveDirection
+                        bv.Velocity = (Camera.CFrame.LookVector*md.Z*-1 + Camera.CFrame.RightVector*md.X) * Config.Movement.FlySpeed
+                    end
+                    task.wait()
+                end
+                bv:Destroy(); gy:Destroy()
+            end
+            Flying = false
+        end
+    end
+end)
+
+-- Farm
+CreateToggle(FarmPage,"Farmear Monedas (TP)",Config.Farm.CoinFarm,function(v) Config.Farm.CoinFarm=v end)
+local TPbtn = Instance.new("TextButton")
+TPbtn.Size = UDim2.new(1,0,0,30); TPbtn.BackgroundColor3 = Color3.fromRGB(40,40,55)
+TPbtn.Text = "TP a Asesino"; TPbtn.TextColor3 = Color3.fromRGB(255,255,255)
+TPbtn.Font = Enum.Font.GothamBold; TPbtn.TextSize = 11; TPbtn.Parent = FarmPage
+Instance.new("UICorner", TPbtn).CornerRadius = UDim.new(0,6)
+TPbtn.MouseButton1Click:Connect(function()
+    if CurrentMurderer and CurrentMurderer.Character and LocalPlayer.Character then
+        local h = CurrentMurderer.Character:FindFirstChild("HumanoidRootPart")
+        if h then LocalPlayer.Character:PivotTo(h.CFrame * CFrame.new(0,0,3)) end
+    end
+end)
+task.spawn(function()
+    while task.wait(0.2) do
+        if Config.Farm.CoinFarm and LocalPlayer.Character then
+            local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local coin = FindNearestCoin(hrp.Position, 100)
+                if coin then
+                    local tp = coin.Position
+                    local d = (tp-hrp.Position).Magnitude
+                    local steps = math.max(1, math.ceil(d/Config.Farm.MaxTeleportDist))
+                    for i = 1, steps do
+                        if not Config.Farm.CoinFarm then break end
+                        hrp.CFrame = hrp.CFrame:Lerp(CFrame.new(tp), i/steps)
+                        task.wait(0.05)
+                    end
+                    task.wait(Config.Farm.HumanDelay)
+                end
+            end
+        end
+    end
+end)
+
+-- Seguridad
+CreateToggle(SafePage,"Anti-AFK",Config.Safety.AntiAFK,function(v) Config.Safety.AntiAFK=v end)
+CreateToggle(SafePage,"Delays Aleatorios",Config.Safety.RandomizeDelays,function(v) Config.Safety.RandomizeDelays=v end)
+LocalPlayer.Idled:Connect(function()
+    if Config.Safety.AntiAFK then
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new(0,0))
+    end
+end)
+
+-- Cierre
+CloseBtn.MouseButton1Click:Connect(function()
+    Config.ESP.Enabled=false; Config.Aimbot.Enabled=false
+    Config.Bring.Murderer=false; Config.Bring.Sheriff=false; Config.Bring.Innocent=false
+    Config.Bring.GunDrop=false; Config.Bring.StaticMurderer=false; Config.Combat.AutoKillAll=false
+    Config.Fling.Active=false; Config.Movement.SpeedEnabled=false; Config.Movement.FlyEnabled=false
+    Config.Farm.CoinFarm=false
+    ScreenGui:Destroy()
+end)
+
+print("[MM2 Hub]: Actualizado v4.3 (Bring original + TP Estático + Auto Kill All).")
+
+end)
+
+if not Success then warn("[MM2 Hub Error]: "..tostring(Error)) end
